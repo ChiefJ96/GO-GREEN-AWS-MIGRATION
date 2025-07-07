@@ -1,77 +1,67 @@
-// modules/s3/main.tf
-
-resource "aws_s3_bucket" "documents" {
-  bucket = "gogreen-documents"
-  force_destroy = true
+resource "aws_kms_key" "s3_key" {
+  description             = "KMS key for S3 bucket encryption"
+  deletion_window_in_days = 10
 
   tags = {
-    Name        = "GoGreenDocuments"
-    Environment = "Production"
+    Name = "${var.name_prefix}-s3-kms-key"
   }
 }
 
-# Enable encryption with AWS KMS
-resource "aws_s3_bucket_server_side_encryption_configuration" "default" {
-  bucket = aws_s3_bucket.documents.id
+resource "aws_s3_bucket" "this" {
+  bucket = var.bucket_name
+
+  tags = {
+    Name = var.bucket_name
+  }
+
+  force_destroy = false
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "this" {
+  bucket = aws_s3_bucket.this.id
 
   rule {
     apply_server_side_encryption_by_default {
+      kms_master_key_id = aws_kms_key.s3_key.arn
       sse_algorithm     = "aws:kms"
     }
   }
 }
 
-# Enforce HTTPS-only access
-resource "aws_s3_bucket_policy" "https_only" {
-  bucket = aws_s3_bucket.documents.id
+resource "aws_s3_bucket_public_access_block" "this" {
+  bucket = aws_s3_bucket.this.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+# S3 bucket policy restricted to EC2 role only
+resource "aws_s3_bucket_policy" "this" {
+  bucket     = aws_s3_bucket.this.id
+  depends_on = [aws_s3_bucket_public_access_block.this]
 
   policy = jsonencode({
     Version = "2012-10-17",
     Statement = [
       {
-        Sid       = "AllowSSLRequestsOnly",
-        Effect    = "Deny",
-        Principal = "*",
-        Action    = "s3:*",
-        Resource = [
-          "${aws_s3_bucket.documents.arn}/*",
-          "${aws_s3_bucket.documents.arn}"
+        Sid    = "AllowS3ReadWriteForEC2Role"
+        Effect = "Allow",
+        Principal = {
+          AWS = var.ec2_role_arn
+        },
+        Action = [
+          "s3:GetObject",
+          "s3:ListBucket",
+          "s3:PutObject"
         ],
-        Condition = {
-          Bool = {
-            "aws:SecureTransport" = "false"
-          }
-        }
+        Resource = [
+          aws_s3_bucket.this.arn,
+          "${aws_s3_bucket.this.arn}/*"
+        ]
       }
     ]
   })
 }
 
-# Lifecycle policy to move data to cheaper storage
-resource "aws_s3_bucket_lifecycle_configuration" "lifecycle" {
-  bucket = aws_s3_bucket.documents.id
-
-  rule {
-    id     = "archive-old-docs"
-    status = "Enabled"
-
-    transition {
-      days          = 90
-      storage_class = "STANDARD_IA"
-    }
-
-    transition {
-      days          = 180
-      storage_class = "DEEP_ARCHIVE"
-    }
-
-    noncurrent_version_transition {
-      noncurrent_days = 30
-      storage_class   = "GLACIER"
-    }
-
-    expiration {
-      expired_object_delete_marker = true
-    }
-  }
-}

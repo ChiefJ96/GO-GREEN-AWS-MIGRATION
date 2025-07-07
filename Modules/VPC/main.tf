@@ -1,178 +1,257 @@
-// modules/vpc/main.tf
+provider "aws" {
+  region = var.region
+}
 
-resource "aws_vpc" "main" {
-  cidr_block           = "10.0.0.0/16"
+data "aws_availability_zones" "available" {}
+
+resource "aws_vpc" "this" {
+  cidr_block           = var.vpc_cidr
   enable_dns_support   = true
   enable_dns_hostnames = true
+
   tags = {
-    Name = "gogreen-vpc"
+    Name = "${var.name_prefix}-vpc"
   }
 }
 
-resource "aws_internet_gateway" "gw" {
-  vpc_id = aws_vpc.main.id
-  tags = {
-    Name = "gogreen-igw"
-  }
-}
-
-// PUBLIC SUBNETS
-resource "aws_subnet" "public_a" {
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.0.1.0/24"
-  availability_zone       = "us-west-2a"
+resource "aws_subnet" "public" {
+  count             = length(var.public_subnet_cidrs)
+  vpc_id            = aws_vpc.this.id
+  cidr_block        = var.public_subnet_cidrs[count.index]
+  availability_zone = data.aws_availability_zones.available.names[count.index]
   map_public_ip_on_launch = true
+
   tags = {
-    Name = "public-subnet-a"
+    Name = "${var.name_prefix}-public-${count.index + 1}"
   }
 }
 
-resource "aws_subnet" "public_b" {
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.0.2.0/24"
-  availability_zone       = "us-west-2b"
-  map_public_ip_on_launch = true
+resource "aws_subnet" "private" {
+  count             = length(var.private_subnet_cidrs)
+  vpc_id            = aws_vpc.this.id
+  cidr_block        = var.private_subnet_cidrs[count.index]
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
   tags = {
-    Name = "public-subnet-b"
+    Name = "${var.name_prefix}-private-${count.index + 1}"
   }
 }
 
-// PRIVATE SUBNETS
-resource "aws_subnet" "private_app_a" {
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = "10.0.11.0/24"
-  availability_zone = "us-west-2a"
+resource "aws_subnet" "database" {
+  count             = length(var.database_subnet_cidrs)
+  vpc_id            = aws_vpc.this.id
+  cidr_block        = var.database_subnet_cidrs[count.index]
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+
   tags = {
-    Name = "private-app-subnet-a"
+    Name = "${var.name_prefix}-database-${count.index + 1}"
   }
 }
 
-resource "aws_subnet" "private_app_b" {
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = "10.0.12.0/24"
-  availability_zone = "us-west-2b"
+resource "aws_internet_gateway" "igw" {
+  vpc_id = aws_vpc.this.id
+
   tags = {
-    Name = "private-app-subnet-b"
+    Name = "${var.name_prefix}-igw"
   }
 }
 
-resource "aws_subnet" "private_db_a" {
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = "10.0.21.0/24"
-  availability_zone = "us-west-2a"
+resource "aws_eip" "nat" {
+  count = length(aws_subnet.public)
+
   tags = {
-    Name = "private-db-subnet-a"
+    Name = "${var.name_prefix}-nat-eip-${count.index + 1}"
   }
 }
 
-resource "aws_subnet" "private_db_b" {
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = "10.0.22.0/24"
-  availability_zone = "us-west-2b"
+resource "aws_nat_gateway" "natgw" {
+  count         = length(aws_subnet.public)
+  allocation_id = aws_eip.nat[count.index].id
+  subnet_id     = aws_subnet.public[count.index].id
+  depends_on    = [aws_internet_gateway.igw]
+
   tags = {
-    Name = "private-db-subnet-b"
+    Name = "${var.name_prefix}-natgw-${count.index + 1}"
   }
 }
 
-// NAT Gateways for Private Subnets
-resource "aws_eip" "nat_a" {
- vpc = true
-}
-
-resource "aws_nat_gateway" "nat_a" {
-  allocation_id = aws_eip.nat_a.id
-  subnet_id     = aws_subnet.public_a.id
-  tags = {
-    Name = "nat-gateway-a"
-  }
-}
-
-resource "aws_eip" "nat_b" {
-  vpc = true
-}
-
-resource "aws_nat_gateway" "nat_b" {
-  allocation_id = aws_eip.nat_b.id
-  subnet_id     = aws_subnet.public_b.id
-  tags = {
-    Name = "nat-gateway-b"
-  }
-}
-
-// Route Tables
 resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.main.id
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.gw.id
-  }
+  vpc_id = aws_vpc.this.id
+
   tags = {
-    Name = "public-rt"
+    Name = "${var.name_prefix}-public-rt"
   }
 }
 
-resource "aws_route_table_association" "public_a" {
-  subnet_id      = aws_subnet.public_a.id
+resource "aws_route" "public_internet" {
+  route_table_id         = aws_route_table.public.id
+  destination_cidr_block = "0.0.0.0/0"
+  gateway_id             = aws_internet_gateway.igw.id
+}
+
+resource "aws_route_table_association" "public_assoc" {
+  count          = length(aws_subnet.public)
+  subnet_id      = aws_subnet.public[count.index].id
   route_table_id = aws_route_table.public.id
 }
 
-resource "aws_route_table_association" "public_b" {
-  subnet_id      = aws_subnet.public_b.id
-  route_table_id = aws_route_table.public.id
-}
+resource "aws_route_table" "private" {
+  count  = length(aws_subnet.private)
+  vpc_id = aws_vpc.this.id
 
-// Private route tables (each AZ gets a NAT)
-resource "aws_route_table" "private_a" {
-  vpc_id = aws_vpc.main.id
-  route {
-    cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.nat_a.id
-  }
   tags = {
-    Name = "private-rt-a"
+    Name = "${var.name_prefix}-private-rt-${count.index + 1}"
   }
 }
 
-resource "aws_route_table" "private_b" {
-  vpc_id = aws_vpc.main.id
-  route {
-    cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.nat_b.id
-  }
+resource "aws_route" "private_nat" {
+  count                  = length(aws_route_table.private)
+  route_table_id         = aws_route_table.private[count.index].id
+  destination_cidr_block = "0.0.0.0/0"
+  nat_gateway_id         = aws_nat_gateway.natgw[count.index].id
+}
+
+resource "aws_route_table_association" "private_assoc" {
+  count          = length(aws_subnet.private)
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private[count.index].id
+}
+
+resource "aws_route_table" "database" {
+  count  = length(aws_subnet.database)
+  vpc_id = aws_vpc.this.id
+
   tags = {
-    Name = "private-rt-b"
+    Name = "${var.name_prefix}-database-rt-${count.index + 1}"
   }
 }
 
-resource "aws_route_table_association" "private_app_a" {
-  subnet_id      = aws_subnet.private_app_a.id
-  route_table_id = aws_route_table.private_a.id
+resource "aws_route" "database_nat" {
+  count                  = length(aws_route_table.database)
+  route_table_id         = aws_route_table.database[count.index].id
+  destination_cidr_block = "0.0.0.0/0"
+  nat_gateway_id         = aws_nat_gateway.natgw[count.index].id
 }
 
-resource "aws_route_table_association" "private_app_b" {
-  subnet_id      = aws_subnet.private_app_b.id
-  route_table_id = aws_route_table.private_b.id
+resource "aws_route_table_association" "database_assoc" {
+  count          = length(aws_subnet.database)
+  subnet_id      = aws_subnet.database[count.index].id
+  route_table_id = aws_route_table.database[count.index].id
 }
 
-resource "aws_route_table_association" "private_db_a" {
-  subnet_id      = aws_subnet.private_db_a.id
-  route_table_id = aws_route_table.private_a.id
+# Basic Network ACL for public subnets
+resource "aws_network_acl" "public" {
+  vpc_id = aws_vpc.this.id
+
+  tags = {
+    Name = "${var.name_prefix}-public-nacl"
+  }
 }
 
-resource "aws_route_table_association" "private_db_b" {
-  subnet_id      = aws_subnet.private_db_b.id
-  route_table_id = aws_route_table.private_b.id
+resource "aws_network_acl_rule" "public_in_http" {
+  network_acl_id = aws_network_acl.public.id
+  rule_number    = 100
+  protocol       = "6"
+  rule_action   = "allow"
+  egress         = false
+  cidr_block     = "0.0.0.0/0"
+  from_port     = 80
+  to_port       = 80
 }
-module "alb" {
-  source = "./modules/alb"
 
-  ec2_sg            = module.vpc.ec2_sg
-  target_group_name = "GoGreenAppTG"
-  health_check_path = "/health"
+resource "aws_network_acl_rule" "public_in_https" {
+  network_acl_id = aws_network_acl.public.id
+  rule_number    = 110
+  protocol       = "6"
+  rule_action   = "allow"
+  egress         = false
+  cidr_block     = "0.0.0.0/0"
+  from_port     = 443
+  to_port       = 443
 }
-output "vpc_id" {
-  value = aws_vpc.main.id
+
+resource "aws_network_acl_rule" "public_out_all" {
+  network_acl_id = aws_network_acl.public.id
+  rule_number    = 100
+  protocol       = "-1"
+  rule_action   = "allow"
+  egress         = true
+  cidr_block     = "0.0.0.0/0"
 }
-output "ec2_sg" {
-  value = aws_security_group.ec2_sg.id
+
+resource "aws_network_acl_association" "public_assoc" {
+  count          = length(aws_subnet.public)
+  subnet_id      = aws_subnet.public[count.index].id
+  network_acl_id = aws_network_acl.public.id
 }
+
+# Network ACL for private subnets - allow outgoing, established incoming
+resource "aws_network_acl" "private" {
+  vpc_id = aws_vpc.this.id
+
+  tags = {
+    Name = "${var.name_prefix}-private-nacl"
+  }
+}
+
+resource "aws_network_acl_rule" "private_in_established" {
+  network_acl_id = aws_network_acl.private.id
+  rule_number    = 100
+  protocol       = "6"
+  rule_action   = "allow"
+  egress         = false
+  cidr_block     = var.vpc_cidr
+  from_port     = 1024
+  to_port       = 65535
+}
+
+resource "aws_network_acl_rule" "private_out_all" {
+  network_acl_id = aws_network_acl.private.id
+  rule_number    = 100
+  protocol       = "-1"
+  rule_action   = "allow"
+  egress         = true
+  cidr_block     = "0.0.0.0/0"
+}
+
+resource "aws_network_acl_association" "private_assoc" {
+  count          = length(aws_subnet.private)
+  subnet_id      = aws_subnet.private[count.index].id
+  network_acl_id = aws_network_acl.private.id
+}
+
+# Network ACL for database subnets similar to private
+resource "aws_network_acl" "database" {
+  vpc_id = aws_vpc.this.id
+
+  tags = {
+    Name = "${var.name_prefix}-database-nacl"
+  }
+}
+
+resource "aws_network_acl_rule" "database_in_established" {
+  network_acl_id = aws_network_acl.database.id
+  rule_number    = 100
+  protocol       = "6"
+  rule_action   = "allow"
+  egress         = false
+  cidr_block     = var.vpc_cidr
+  from_port     = 1024
+  to_port       = 65535
+}
+
+resource "aws_network_acl_rule" "database_out_all" {
+  network_acl_id = aws_network_acl.database.id
+  rule_number    = 100
+  protocol       = "-1"
+  rule_action   = "allow"
+  egress         = true
+  cidr_block     = "0.0.0.0/0"
+}
+
+resource "aws_network_acl_association" "database_assoc" {
+  count          = length(aws_subnet.database)
+  subnet_id      = aws_subnet.database[count.index].id
+  network_acl_id = aws_network_acl.database.id
+}
+

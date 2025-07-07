@@ -1,76 +1,70 @@
-// modules/iam/main.tf
+/*
+  IAM Module
 
-######################
-# IAM GROUPS
-######################
+  Purpose:
+  Provides IAM Role and Instance Profile to EC2 instances with permissions 
+  to access S3 buckets and CloudWatch.
 
-resource "aws_iam_group" "sysadmin" {
-  name = "SysAdmin"
-}
+  Why needed:
+  To enable secure and auditable access for EC2 to AWS services without embedding credentials.
 
-resource "aws_iam_group" "dbadmin" {
-  name = "DBAdmin"
-}
+*/
 
-resource "aws_iam_group" "monitor" {
-  name = "Monitor"
-}
 
-######################
-# IAM POLICIES
-######################
+resource "aws_iam_role" "ec2_role" {
+  name = "${var.name_prefix}-ec2-role"
 
-data "aws_iam_policy_document" "sysadmin_policy" {
-  statement {
-    actions   = ["*"]
-    resources = ["*"]
-  }
-}
-
-resource "aws_iam_policy" "sysadmin" {
-  name        = "SysAdminPolicy"
-  description = "Full access to everything"
-  policy      = data.aws_iam_policy_document.sysadmin_policy.json
-}
-
-resource "aws_iam_group_policy_attachment" "sysadmin_attach" {
-  group      = aws_iam_group.sysadmin.name
-  policy_arn = aws_iam_policy.sysadmin.arn
-}
-
-######################
-# EC2 ROLE FOR S3 ACCESS
-######################
-
-data "aws_iam_policy_document" "ec2_s3_access" {
-  statement {
-    actions   = ["s3:PutObject", "s3:GetObject"]
-    resources = ["arn:aws:s3:::gogreen-documents/*"]
-  }
-}
-
-resource "aws_iam_role" "ec2_s3_role" {
-  name               = "EC2toS3IAMRole"
   assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Effect = "Allow",
+      Principal = {
+        Service = "ec2.amazonaws.com"
+      },
+      Action = "sts:AssumeRole"
+    }]
+  })
+
+  tags = {
+    Name = "${var.name_prefix}-ec2-role"
+  }
+}
+
+resource "aws_iam_policy" "ec2_policy" {
+  name        = "${var.name_prefix}-ec2-policy"
+  description = "Policy for EC2 instances to access S3, CloudWatch, Logs"
+
+  policy = jsonencode({
     Version = "2012-10-17",
     Statement = [
       {
         Effect = "Allow",
-        Principal = {
-          Service = "ec2.amazonaws.com"
-        },
-        Action = "sts:AssumeRole"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:ListBucket",
+          "cloudwatch:PutMetricData",
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        Resource = "*"
       }
     ]
   })
 }
 
-resource "aws_iam_policy" "ec2_s3_policy" {
-  name   = "EC2S3Policy"
-  policy = data.aws_iam_policy_document.ec2_s3_access.json
+resource "aws_iam_role_policy_attachment" "ec2_attach" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = aws_iam_policy.ec2_policy.arn
 }
 
-resource "aws_iam_role_policy_attachment" "ec2_s3_attach" {
-  role       = aws_iam_role.ec2_s3_role.name
-  policy_arn = aws_iam_policy.ec2_s3_policy.arn
+resource "aws_iam_instance_profile" "ec2_instance_profile" {
+  name = "${var.name_prefix}-ec2-instance-profile-${random_id.suffix.hex}"
+  role = aws_iam_role.ec2_role.name
 }
+
+resource "random_id" "suffix" {
+  byte_length = 4
+}
+

@@ -1,20 +1,19 @@
-variable "vpc_id" {}
-variable "public_subnet_a" {}
-variable "public_subnet_b" {}
-variable "alb_sg" {}
-variable "ec2_sg" {
-  description = "EC2 security group to attach to the ALB"
+variable "name_prefix" {
+  description = "Prefix for resource names"
   type        = string
 }
 
-variable "target_group_name" {
-  description = "Name for the target group"
+variable "vpc_id" {
+  description = "VPC ID where ALB will be deployed"
   type        = string
 }
 
-variable "health_check_path" {
-  description = "Health check path for the target group"
-  type        = string
-  default     = "/"
+variable "public_subnet_ids" {
+  description = "List of public subnet IDs for ALB"
+  type        = list(string)
 }
 
+variable "security_group_id" {
+  description = "Security group ID to associate with ALB"
+  type        = string
+}
